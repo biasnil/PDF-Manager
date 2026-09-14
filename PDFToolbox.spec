@@ -29,7 +29,10 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[(tkdnd_path, 'tkinterdnd2/tkdnd')],
+    datas=[
+        (tkdnd_path, 'tkinterdnd2/tkdnd'),
+        ('app_icon.ico', '.'),   # so main.py can set the window/taskbar icon at runtime too
+    ],
     hiddenimports=[
         # pymupdf's importable name is "fitz" — PyInstaller usually
         # catches this via its own bundled hook, but listing both
@@ -70,7 +73,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,                # set to r'path\to\icon.ico' once you have one
+    icon='app_icon.ico',       # exe / taskbar icon — see PDF_Tool_box.png conversion
 )
 
 coll = COLLECT(

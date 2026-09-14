@@ -30,6 +30,12 @@ if not exist "PDFToolbox.spec" (
     goto :fail
 )
 
+if not exist "app_icon.ico" (
+    echo [ERROR] app_icon.ico not found in this folder.
+    echo PDFToolbox.spec expects it right next to main.py.
+    goto :fail
+)
+
 REM --- activate the venv, if there is one -----------------------------
 REM Adjust this path first if your virtual environment folder isn't
 REM called "venv" - e.g. change to ".venv\Scripts\activate.bat".

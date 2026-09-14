@@ -27,6 +27,8 @@ To add a new tool: write a new Script/<name>_tool.py subclassing BaseTool,
 then add one line for it to PDFToolboxApp.TOOLS in Script/main_window.py.
 """
 
+import os
+import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -41,6 +43,17 @@ except ImportError:
     _DND_AVAILABLE = False
 
 
+def resource_path(relative_path: str) -> str:
+    """Resolve a bundled data file's path both when running from source
+    (python main.py) and when frozen into an exe by PyInstaller. Frozen,
+    PyInstaller extracts/places bundled data under sys._MEIPASS (onefile)
+    or right next to the exe (onedir) — either way this attribute is set
+    only in the frozen build, so its absence means we're running from
+    source and the file just sits next to this one."""
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+
 def main():
     # TkinterDnD.Tk() is a drop-in replacement for tk.Tk() that adds OS-level
     # drag-and-drop support (see Script/dnd_support.py). If tkinterdnd2 isn't
@@ -50,6 +63,15 @@ def main():
     root.title(config.APP_TITLE)
     root.geometry(config.APP_GEOMETRY)
     root.configure(bg=config.APP_BG)
+
+    # Window/taskbar icon. iconbitmap with a .ico only works on Windows —
+    # wrapped in try/except so this never blocks the app from opening on
+    # another platform, or if app_icon.ico simply isn't present (e.g.
+    # someone cloned the repo without it).
+    try:
+        root.iconbitmap(resource_path("app_icon.ico"))
+    except tk.TclError:
+        pass
 
     style = ttk.Style(root)
     try:
