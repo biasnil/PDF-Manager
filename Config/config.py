@@ -131,13 +131,17 @@ EDIT_DEFAULT_FONT_SIZE = 12
 EDIT_HIGHLIGHT_OPACITY = 0.35
 EDIT_HIGHLIGHT_WIDTH = 14        # stroke width used for "Free Hand Highlight"
 
-# (display name, PDF font code) — PyMuPDF's base-14 shorthand aliases
+# (display name, base-14 PDF fallback code) — the fallback is only used
+# if the real font file isn't found on the machine at save time; see
+# Script/pdf_edit_operations.py's font-file resolution. All 3 are
+# standard pre-installed Windows fonts, so on a normal Windows machine
+# the real font is used, not the fallback.
 FONT_CHOICES = [
-    ("Helvetica", "helv"),
-    ("Times Roman", "tiro"),
-    ("Courier", "cour"),
+    ("Arial", "helv"),
+    ("Calibri", "helv"),
+    ("Georgia", "tiro"),
 ]
-DEFAULT_FONT_NAME = "Helvetica"
+DEFAULT_FONT_NAME = "Arial"
 FONT_SIZE_OPTIONS = [8, 10, 12, 14, 16, 18, 24, 32, 48]
 
 # a plain click (no drag) with a box-placing tool active uses this default

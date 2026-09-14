@@ -13,7 +13,7 @@ from Script.compress_tool import CompressTool
 from Script.merge_tool import MergeTool
 from Script.image_pdf_tool import ImagePdfTool
 from Script.organize_pdf_tool import OrganizePdfTool
-from Script.pdf_edit_tool import PdfEditTool
+from Script.edit_pdf import PdfEditTool
 from Script.ppt_pdf_tool import PptPdfTool
 from Script.split_tool import SplitTool
 from Script.word_pdf_tool import WordPdfTool

@@ -51,18 +51,29 @@ class PDFSplitter:
         preview (tk.PhotoImage(data=...) loads PNG bytes directly — no
         Pillow required). Returns one PNG per page, in page order.
         """
-        thumbnails = []
         with pymupdf.open(input_path) as doc:
-            total = doc.page_count
-            for i in range(total):
-                if progress:
-                    progress(i + 1, total, f"Rendering preview {i + 1}/{total}")
-                page = doc[i]
-                rect = page.rect
-                longest_side = max(rect.width, rect.height) or 1
-                scale = max_dim / longest_side
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale))
-                thumbnails.append(pix.tobytes("png"))
+            return PDFSplitter.generate_thumbnails_from_doc(doc, max_dim=max_dim, progress=progress)
+
+    @staticmethod
+    def generate_thumbnails_from_doc(doc: "pymupdf.Document", max_dim: int = config.THUMB_MAX_DIM,
+                                      progress: ProgressCallback = None) -> list[bytes]:
+        """
+        Same as generate_thumbnails, but for a document that's already
+        open in memory — used by the Edit PDF tab, whose live doc may
+        include blank pages inserted this session that don't exist on
+        disk yet, so re-reading input_path would miss them.
+        """
+        thumbnails = []
+        total = doc.page_count
+        for i in range(total):
+            if progress:
+                progress(i + 1, total, f"Rendering preview {i + 1}/{total}")
+            page = doc[i]
+            rect = page.rect
+            longest_side = max(rect.width, rect.height) or 1
+            scale = max_dim / longest_side
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale))
+            thumbnails.append(pix.tobytes("png"))
         return thumbnails
 
     @staticmethod
@@ -203,21 +214,55 @@ class PDFOrganizer:
         """
         page_order: the ORIGINAL (0-indexed) page numbers, in the new
         order you want them saved in. Omit a page number to drop that
-        page entirely.
+        page entirely. A negative entry is a "blank page" marker (from
+        the Organize tab's insert-a-blank-page "+") — its exact value
+        doesn't matter, only that it's negative; a real, empty page is
+        created at that spot, sized to match the document's other pages.
         """
         if not page_order:
             raise ValueError("No pages to save — the document would be empty.")
 
+        real_pages = [p for p in page_order if p >= 0]
+        blank_count = len(page_order) - len(real_pages)
+        if not real_pages:
+            raise ValueError(
+                "The document would be empty — it needs at least one real page."
+            )
+
         if progress:
-            progress(0, 1, "Reordering pages...")
+            progress(0, 1 + blank_count, "Reordering pages...")
 
         doc = pymupdf.open(input_path)
-        doc.select(page_order)
+        doc.select(real_pages)
+
+        if doc.page_count:
+            ref_rect = doc[0].rect
+            blank_size = (ref_rect.width, ref_rect.height)
+        else:
+            blank_size = pymupdf.paper_size("a4")
+
+        # Walk page_order again, tracking how many pages (real + blank)
+        # have been placed so far — that count is exactly where the next
+        # blank marker needs to land in `doc`. Real entries were already
+        # placed in the right relative order by doc.select() above, so
+        # they just advance the position pointer.
+        inserted = 0
+        position = 0
+        for p in page_order:
+            if p >= 0:
+                position += 1
+            else:
+                doc.new_page(pno=position, width=blank_size[0], height=blank_size[1])
+                position += 1
+                inserted += 1
+                if progress:
+                    progress(1 + inserted, 1 + blank_count, "Adding blank page...")
+
         doc.save(output_path)
         doc.close()
 
         if progress:
-            progress(1, 1, "Done")
+            progress(1 + blank_count, 1 + blank_count, "Done")
         return output_path
 
 

@@ -2,8 +2,9 @@
 Script/organize_pdf_tool.py — the "Organize PDF" tab.
 
 Choose a PDF, see every page as a thumbnail, drag a thumbnail to move it
-to a new position, and click its × to drop that page — then save the
-result in the new order.
+to a new position, click its × to drop that page, or hover the slim gap
+between two thumbnails for a moment to reveal a "+" that inserts a blank
+page right there — then save the result in the new order.
 """
 
 import os
@@ -22,10 +23,12 @@ class OrganizeTile(tk.Frame):
     current position number, a × to remove it, and is itself draggable to
     reorder — click and drag it over another tile to swap positions."""
 
-    def __init__(self, master, original_index, photo, on_drag_over, on_drop, on_remove):
+    def __init__(self, master, original_index, photo, on_drag_over, on_drop, on_remove,
+                 is_blank=False):
         super().__init__(master, bg=config.PANEL_BG)
         self.original_index = original_index
         self.photo = photo  # keep a reference so it isn't garbage-collected
+        self.is_blank = is_blank
         self.on_drag_over = on_drag_over
         self.on_drop = on_drop
         self.on_remove = on_remove
@@ -34,6 +37,14 @@ class OrganizeTile(tk.Frame):
         self.border.pack(padx=2, pady=2)
         self.img_label = tk.Label(self.border, image=photo, bg="white", bd=0, cursor="hand2")
         self.img_label.pack(padx=2, pady=2)
+
+        if is_blank:
+            # A page inserted via the "+" gap, not a real page from the
+            # source PDF yet — just a plain white sheet until it's saved.
+            tk.Label(
+                self.img_label, text="Blank\npage", bg="white", justify="center",
+                fg=config.TEXT_MUTED, font=config.FONT_SMALL,
+            ).place(relx=0.5, rely=0.5, anchor="center")
 
         self.remove_btn = tk.Label(
             self.img_label, text="\u00d7", bg=config.ACCENT, fg="white",
@@ -72,12 +83,71 @@ class OrganizeTile(tk.Frame):
         self.on_drop()
 
 
+class InsertGap(tk.Frame):
+    """The slim strip that sits before a page tile (one also trails the
+    very last tile). Normally it's just blank space the same color as the
+    background — hover over it for a moment and a "+" fades in; click it
+    to insert a blank page right there.
+
+    `position` is where the new page lands in page_order (0 = before the
+    very first page, len(page_order) = after the very last one).
+    """
+
+    HOVER_DELAY_MS = 500
+    WIDTH = 18
+
+    def __init__(self, master, position, on_insert, is_dragging=lambda: False):
+        super().__init__(master, bg=config.PANEL_BG, width=self.WIDTH)
+        self.position = position
+        self.on_insert = on_insert
+        self.is_dragging = is_dragging
+        self._pending_after_id = None
+
+        self.plus_label = tk.Label(
+            self, text="+", bg=config.PANEL_BG, fg=config.ACCENT,
+            font=(config.FONT_FAMILY, 14, "bold"), cursor="hand2",
+        )
+        # not shown until the hover delay elapses — see _show_plus
+
+        for widget in (self, self.plus_label):
+            widget.bind("<Enter>", self._on_enter)
+            widget.bind("<Leave>", self._on_leave)
+        self.plus_label.bind("<Button-1>", self._on_click)
+
+    def _on_enter(self, _event):
+        if self.is_dragging() or self._pending_after_id is not None:
+            return  # don't tempt-tease a "+" mid-drag, or double-schedule it
+        self._pending_after_id = self.after(self.HOVER_DELAY_MS, self._show_plus)
+
+    def _on_leave(self, _event):
+        # Moving from the strip onto the "+" label (its own child) also
+        # fires <Leave> on the strip — only actually hide once the pointer
+        # is over neither.
+        x, y = self.winfo_pointerxy()
+        under = self.winfo_containing(x, y)
+        if under in (self, self.plus_label):
+            return
+        if self._pending_after_id is not None:
+            self.after_cancel(self._pending_after_id)
+            self._pending_after_id = None
+        self.plus_label.place_forget()
+
+    def _show_plus(self):
+        self._pending_after_id = None
+        self.plus_label.place(relx=0.5, rely=0.5, anchor="center")
+
+    def _on_click(self, _event):
+        self.on_insert(self.position)
+        return "break"
+
+
 class OrganizePdfTool(BaseTool):
     title = "Organize PDF"
     description = (
-        "Choose a PDF, then drag any page thumbnail to reorder it, or "
-        "click its × to remove that page. Save when you're happy with "
-        "the new order."
+        "Choose a PDF, then drag any page thumbnail to reorder it, click "
+        "its × to remove that page, or hover the gap between two pages "
+        "for a moment to insert a blank page there. Save when you're "
+        "happy with the new order."
     )
 
     def __init__(self, master, root):
@@ -107,6 +177,15 @@ class OrganizePdfTool(BaseTool):
         self.tiles: dict[int, OrganizeTile] = {}
         self.page_order: list[int] = []  # original page indices, in the new order
 
+        # Blank pages inserted via the "+" gap don't exist in the source
+        # PDF, so they can't have a real (>= 0) original_index. They get a
+        # unique negative id instead — reorder_and_save() treats any
+        # negative entry in page_order as "insert one blank page here".
+        self._next_blank_id = -1
+        self._gap_widgets: list[InsertGap] = []
+        self._dragging = False
+        self.blank_size = (config.ORGANIZE_THUMB_MAX_DIM, int(config.ORGANIZE_THUMB_MAX_DIM * 1.414))
+
         self.progress = ProgressRow(self.body, "Save changes", self._save)
         self.progress.pack(fill=tk.X, pady=(12, 0))
 
@@ -132,6 +211,8 @@ class OrganizePdfTool(BaseTool):
             self.grid_container = None
         self.tiles.clear()
         self.page_order = []
+        self._next_blank_id = -1
+        self._gap_widgets = []
 
         self.status_label.config(text="Loading previews…")
         self.status_label.pack(fill=tk.X, pady=(8, 0))
@@ -182,18 +263,50 @@ class OrganizePdfTool(BaseTool):
             self.tiles[i] = tile
             self.page_order.append(i)
 
+        if self.photos:
+            self.blank_size = (self.photos[0].width(), self.photos[0].height())
+
         self._relayout()
 
     # -- drag to reorder -----------------------------------------------
 
     def _relayout(self):
         cols = config.ORGANIZE_GRID_COLS
+        n = len(self.page_order)
+
+        # Grid columns alternate gap, tile, gap, tile, ..., gap: a tile at
+        # row-column `col` sits at grid column 2*col + 1, leaving the even
+        # columns free for the slim InsertGap strip that goes before it.
+        # One extra gap trails the very last tile in the whole grid (for
+        # inserting at the end), even though it lands in a row of its own
+        # when the last row is exactly full — a minor cosmetic quirk.
+        #
+        # Rebuilt from scratch every relayout (positions shift on every
+        # drag/insert/remove), so the previous batch has to go first —
+        # otherwise they'd pile up as stale, still-clickable widgets.
+        for gap in self._gap_widgets:
+            gap.destroy()
+        self._gap_widgets = []
         for position, original_index in enumerate(self.page_order):
             tile = self.tiles[original_index]
+            row, col = divmod(position, cols)
             tile.set_position_label(position + 1)
-            tile.grid(row=position // cols, column=position % cols, padx=4, pady=4)
+            tile.grid(row=row, column=2 * col + 1, padx=4, pady=4, sticky="n")
+
+            gap = InsertGap(self.grid_container.inner, position,
+                             on_insert=self._insert_blank_at, is_dragging=lambda: self._dragging)
+            gap.grid(row=row, column=2 * col, sticky="ns")
+            self._gap_widgets.append(gap)
+
+        row, col = divmod(n, cols)
+        gap = InsertGap(self.grid_container.inner, n,
+                         on_insert=self._insert_blank_at, is_dragging=lambda: self._dragging)
+        gap.grid(row=row, column=2 * col, sticky="ns")
+        self._gap_widgets.append(gap)
 
     def _on_drag_over(self, dragged_original_index, abs_x, abs_y):
+        self._dragging = True
+
         # find which tile's screen area the pointer is currently over
         target_original_index = None
         for original_index, tile in self.tiles.items():
@@ -217,7 +330,33 @@ class OrganizePdfTool(BaseTool):
         self._relayout()
 
     def _on_drop(self):
-        pass  # position is already committed live during the drag
+        self._dragging = False  # position is already committed live during the drag
+
+    # -- insert a blank page -------------------------------------------
+
+    def _insert_blank_at(self, position):
+        """Called when the "+" on a gap is clicked. Adds a plain white
+        tile at `position` — it isn't a real page yet, just a marker that
+        reorder_and_save() will turn into an actual blank page on save."""
+        blank_id = self._next_blank_id
+        self._next_blank_id -= 1
+
+        photo = self._make_blank_photo()
+        self.photos.append(photo)
+        tile = OrganizeTile(
+            self.grid_container.inner, blank_id, photo,
+            on_drag_over=self._on_drag_over, on_drop=self._on_drop,
+            on_remove=self._on_remove, is_blank=True,
+        )
+        self.tiles[blank_id] = tile
+        self.page_order.insert(position, blank_id)
+        self._relayout()
+
+    def _make_blank_photo(self):
+        w, h = self.blank_size
+        photo = tk.PhotoImage(width=w, height=h)
+        photo.put("white", to=(0, 0, w, h))
+        return photo
 
     def _on_remove(self, original_index):
         if len(self.page_order) <= 1:
