@@ -181,6 +181,7 @@ class PdfEditTool(BaseTool):
         self._rotate_handle_to_edit: dict[int, dict] = {}
         self._interaction: Optional[dict] = None
         self._redo_stack: list[dict] = []
+        self._last_canvas_xy: tuple[float, float] = (0, 0)  # tracked via <Motion>, used for Delete/BackSpace
 
         # Edit-mode style panel state (Font/Size/Bold/Italic/Color for
         # whichever line is currently being edited) — deliberately separate
@@ -661,6 +662,26 @@ class PdfEditTool(BaseTool):
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
         self.canvas.bind("<B2-Motion>", self._on_pan_move)
         self.canvas.bind("<ButtonRelease-2>", self._on_pan_end)
+
+        # Ctrl+Z / Ctrl+Y (and Ctrl+Shift+Z as an alt-redo) — same actions as
+        # the Undo/Redo buttons, for both Annotate and Edit mode (they share
+        # _undo/_redo). Works once the canvas has focus, which happens as
+        # soon as the page is clicked (see _on_canvas_press).
+        self.canvas.bind("<Control-z>", lambda e: self._undo())
+        self.canvas.bind("<Control-y>", lambda e: self._redo())
+        self.canvas.bind("<Control-Shift-Z>", lambda e: self._redo())
+
+        # Esc — drop whatever draw tool is active and return to Select
+        self.canvas.bind("<Escape>", lambda e: self._select_tool(None))
+
+        # Ctrl+0 — reset zoom, matching the "Reset" button
+        self.canvas.bind("<Control-0>", lambda e: self._zoom_reset())
+
+        # Delete/Backspace — erase whatever overlay item is under the
+        # cursor, without needing to switch to the Eraser tool first
+        self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<Delete>", self._erase_under_cursor)
+        self.canvas.bind("<BackSpace>", self._erase_under_cursor)
 
         self.progress = ProgressRow(self.body, "Save changes", self._save_changes)
         self.progress.pack(fill=tk.X, pady=(10, 0))
@@ -1296,11 +1317,12 @@ class PdfEditTool(BaseTool):
             if edit["type"] in (T_FREETEXT, T_PARAGRAPH):
                 title = "Edit Free Text" if edit["type"] == T_FREETEXT else "Edit Paragraph"
 
-                def on_save(text, font_display, size, rgb, e=edit):
+                def on_save(text, font_display, size, rgb, align, e=edit):
                     e["text"] = text
                     e["tk_font"] = font_display
                     e["fontsize"] = size
                     e["color"] = rgb
+                    e["align"] = align
                     self._redraw_overlay()
 
                 def on_delete(e=edit):
@@ -1316,6 +1338,7 @@ class PdfEditTool(BaseTool):
                     initial_font_size=edit.get("fontsize", config.EDIT_DEFAULT_FONT_SIZE),
                     initial_color_name=preset_name or "Custom",
                     initial_custom_rgb=None if preset_name else stored_rgb,
+                    initial_align=edit.get("align", "left"), allow_justify=(edit["type"] == T_PARAGRAPH),
                     allow_delete=True, on_save=on_save, on_delete=on_delete,
                 )
                 return
@@ -1472,11 +1495,11 @@ class PdfEditTool(BaseTool):
         x0, y0, x1, y1 = self._normalize_box(x0, y0, x1, y1)
         rect = self._canvas_rect_to_pdf(x0, y0, x1, y1)
 
-        def on_save(text, font_display, size, rgb):
+        def on_save(text, font_display, size, rgb, align):
             self._add_edit({
                 "type": T_FREETEXT, "page": self.current_page_index,
                 "rect": rect, "text": text, "color": rgb,
-                "fontsize": size, "tk_font": font_display,
+                "fontsize": size, "tk_font": font_display, "align": align,
             })
 
         TextBoxDialog(
@@ -1485,6 +1508,7 @@ class PdfEditTool(BaseTool):
             initial_font_size=self._safe_int_var(self.font_size_var, config.EDIT_DEFAULT_FONT_SIZE),
             initial_color_name=self.color_var.get(),
             initial_custom_rgb=self.custom_rgb,
+            allow_justify=False,
             allow_delete=False, on_save=on_save,
         )
 
@@ -1492,11 +1516,11 @@ class PdfEditTool(BaseTool):
         x0, y0, x1, y1 = self._normalize_box(x0, y0, x1, y1)
         rect = self._canvas_rect_to_pdf(x0, y0, x1, y1)
 
-        def on_save(text, font_display, size, rgb):
+        def on_save(text, font_display, size, rgb, align):
             self._add_edit({
                 "type": T_PARAGRAPH, "page": self.current_page_index,
                 "rect": rect, "text": text, "color": rgb,
-                "fontsize": size, "tk_font": font_display,
+                "fontsize": size, "tk_font": font_display, "align": align,
             })
 
         TextBoxDialog(
@@ -1505,6 +1529,7 @@ class PdfEditTool(BaseTool):
             initial_font_size=self._safe_int_var(self.font_size_var, config.EDIT_DEFAULT_FONT_SIZE),
             initial_color_name=self.color_var.get(),
             initial_custom_rgb=self.custom_rgb,
+            allow_justify=True,
             allow_delete=False, on_save=on_save,
         )
 
@@ -1585,6 +1610,12 @@ class PdfEditTool(BaseTool):
         if self.mode_var.get() == EDIT:
             self._image_edit_overlay.refresh(self._promoted_image_xrefs())
 
+    def _on_canvas_motion(self, event):
+        self._last_canvas_xy = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+
+    def _erase_under_cursor(self, event=None):
+        self._erase_at(*self._last_canvas_xy)
+
     def _erase_at(self, cx, cy):
         best_id = None
         best_dist = 12  # pixel tolerance
@@ -1618,11 +1649,24 @@ class PdfEditTool(BaseTool):
             for iid in self._draw_edit_preview(edit):
                 self._overlay_item_to_edit[iid] = edit
 
-    RESIZABLE_TYPES = (T_FREETEXT, T_PARAGRAPH, T_IMAGE, T_EXISTING_IMAGE)
+    RESIZABLE_TYPES = (T_FREETEXT, T_PARAGRAPH, T_IMAGE, T_EXISTING_IMAGE, T_SIGNATURE)
 
     def _pdf_point_to_canvas(self, x, y) -> tuple[float, float]:
         scale = self._scale()
         return x * scale + self._page_x_offset, y * scale
+
+    @staticmethod
+    def _text_align_geometry(align: str, r, pad: int = 3):
+        """(anchor, x, justify) for a top-anchored text item inside canvas
+        rect r, for align in 'left'/'center'/'right'/'justify' — canvas
+        text has no true justify, so that falls back to left visually;
+        the saved PDF still applies real justification (see
+        pdf_edit_operations.py)."""
+        if align == "center":
+            return "n", (r[0] + r[2]) / 2, tk.CENTER
+        if align == "right":
+            return "ne", r[2] - pad, tk.RIGHT
+        return "nw", r[0] + pad, tk.LEFT  # left, and justify's visual fallback
 
     def _draw_edit_preview(self, edit: dict) -> list[int]:
         t = edit["type"]
@@ -1684,11 +1728,13 @@ class PdfEditTool(BaseTool):
                 ))
 
             preview_size = max(6, round(edit.get("fontsize", 12) * scale))
-            text_x, text_y = self._rotate_point_around(r[0] + 3, r[1] + 3, ccx, ccy, rotation)
+            anchor, base_x, justify = self._text_align_geometry(edit.get("align", "left"), r)
+            text_x, text_y = self._rotate_point_around(base_x, r[1] + 3, ccx, ccy, rotation)
             text_kwargs = {"angle": (-rotation) % 360} if rotation else {}
             ids.append(self.canvas.create_text(
-                text_x, text_y, text=edit["text"], anchor="nw", fill=color_hex,
+                text_x, text_y, text=edit["text"], anchor=anchor, fill=color_hex,
                 font=(edit.get("tk_font", "Helvetica"), preview_size),
+                width=max(10, round(r[2] - r[0] - 6)), justify=justify,
                 tags=("overlay", "movable"), **text_kwargs,
             ))
             ids += self._draw_resize_handle(resize_point, edit)
@@ -1779,11 +1825,49 @@ class PdfEditTool(BaseTool):
             ))
 
         elif t == T_SIGNATURE:
+            # Same real-thumbnail + resize/rotate approach as T_IMAGE below,
+            # just fed from the in-memory png_bytes a signature already
+            # carries instead of a file on disk (_render_image_thumbnail
+            # accepts either).
             r = self._pdf_rect_to_canvas(edit["rect"])
-            ids.append(self.canvas.create_rectangle(*r, outline="#3b82f6", dash=(2, 2), tags=("overlay", "movable")))
-            ids.append(self.canvas.create_text(
-                (r[0] + r[2]) / 2, (r[1] + r[3]) / 2, text="Signature", fill="#3b82f6", tags=("overlay", "movable"),
-            ))
+            w, h = max(1, round(r[2] - r[0])), max(1, round(r[3] - r[1]))
+            rotation = edit.get("rotation", 0)
+            rotated_corners, resize_point, rotate_point = self._rotated_box_geometry(r, rotation)
+
+            cache = edit.get("_thumb_cache")
+            cache_key = (w, h, round(rotation, 1))
+            if cache is not None and cache[0] == cache_key:
+                photo = cache[1]
+            else:
+                photo = self._render_image_thumbnail(edit["png_bytes"], w, h, rotation)
+                edit["_thumb_cache"] = (cache_key, photo)
+
+            outline_kwargs = dict(outline="#3b82f6", dash=(2, 2), tags=("overlay", "movable"))
+            if photo is not None:
+                self._overlay_photos.append(photo)
+                cx, cy = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+                ids.append(self.canvas.create_image(
+                    cx, cy, anchor="center", image=photo, tags=("overlay", "movable"),
+                ))
+                if rotation:
+                    ids.append(self.canvas.create_polygon(
+                        *[c for pt in rotated_corners for c in pt], fill="", **outline_kwargs,
+                    ))
+                else:
+                    ids.append(self.canvas.create_rectangle(*r, **outline_kwargs))
+            else:
+                if rotation:
+                    ids.append(self.canvas.create_polygon(
+                        *[c for pt in rotated_corners for c in pt], fill="", **outline_kwargs,
+                    ))
+                else:
+                    ids.append(self.canvas.create_rectangle(*r, **outline_kwargs))
+                ids.append(self.canvas.create_text(
+                    (r[0] + r[2]) / 2, (r[1] + r[3]) / 2, text="Signature", fill="#3b82f6", tags=("overlay", "movable"),
+                ))
+
+            ids += self._draw_resize_handle(resize_point, edit)
+            ids += self._draw_rotate_handle(rotate_point, edit)
 
         elif t == T_FILE_ATTACHMENT:
             x, y = self._pdf_point_to_canvas(*edit["point"])
@@ -1798,10 +1882,11 @@ class PdfEditTool(BaseTool):
                 tags=("overlay", "movable"),
             ))
             preview_size = max(6, round(edit.get("fontsize", 12) * scale))
+            anchor, base_x, justify = self._text_align_geometry(edit.get("align", "left"), r)
             ids.append(self.canvas.create_text(
-                r[0] + 3, r[1] + 3, text=edit["text"][:80], anchor="nw", fill=color_hex,
+                base_x, r[1] + 3, text=edit["text"][:80], anchor=anchor, fill=color_hex,
                 font=(edit.get("tk_font", "Helvetica"), preview_size),
-                width=max(r[2] - r[0] - 6, 10), tags=("overlay", "movable"),
+                width=max(r[2] - r[0] - 6, 10), justify=justify, tags=("overlay", "movable"),
             ))
             ids += self._draw_resize_handle((r[2], r[3]), edit)
 

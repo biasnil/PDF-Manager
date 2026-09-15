@@ -10,14 +10,14 @@ Supported types and their extra keys:
 
     underline / strikeout / squiggly   {"quads": [pymupdf.Quad, ...], "color": (r,g,b)}
     freehand / highlight_freehand      {"points": [(x,y), ...], "color": (r,g,b), "width": float}
-    freetext                            {"rect": (x0,y0,x1,y1), "text": str, "color": (r,g,b), "fontsize": int, "tk_font": str, "rotation": degrees (optional, default 0)}
+    freetext                            {"rect": (x0,y0,x1,y1), "text": str, "color": (r,g,b), "fontsize": int, "tk_font": str, "rotation": degrees (optional, default 0), "align": "left"/"center"/"right" (optional, default "left")}
     insert_text_note                    {"point": (x,y), "text": str}
     replace_text                        {"quads": [...], "new_text": str, "color": (r,g,b), "fontsize": int, "tk_font": str, "bold": bool, "italic": bool}
     shape                               {"shape": "Rectangle"/"Circle"/"Line"/"Arrow", "rect" or "points", "color": (r,g,b), "width": float, "rotation": degrees (optional, default 0)}
     stamp                               {"rect": (x0,y0,x1,y1), "name": str}
-    signature                           {"rect": (x0,y0,x1,y1), "png_bytes": bytes}
+    signature                           {"rect": (x0,y0,x1,y1), "png_bytes": bytes, "rotation": degrees (optional, default 0)}
     file_attachment                     {"point": (x,y), "filepath": str}
-    paragraph                           {"rect": (x0,y0,x1,y1), "text": str, "fontsize": int, "color": (r,g,b), "tk_font": str, "bold": bool, "italic": bool}
+    paragraph                           {"rect": (x0,y0,x1,y1), "text": str, "fontsize": int, "color": (r,g,b), "tk_font": str, "bold": bool, "italic": bool, "align": "left"/"center"/"right"/"justify" (optional, default "left")}
     image                               {"rect": (x0,y0,x1,y1), "filepath": str, "rotation": degrees (optional, default 0)}
     existing_image                      {"rect": current (x0,y0,x1,y1), "original_rect": (x0,y0,x1,y1) it was found at, "image_bytes": bytes, "ext": str, "rotation": degrees (optional, default 0)}
 """
@@ -35,6 +35,16 @@ import pymupdf
 from Config import config
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
+
+# Shared align-name -> pymupdf quadding constant, used by both "freetext"
+# (add_freetext_annot's align=, PDF /Q — only left/center/right, per spec)
+# and "paragraph" (insert_textbox's align=, which also supports justify).
+_ALIGN_TO_QUAD = {
+    "left": pymupdf.TEXT_ALIGN_LEFT,
+    "center": pymupdf.TEXT_ALIGN_CENTER,
+    "right": pymupdf.TEXT_ALIGN_RIGHT,
+    "justify": pymupdf.TEXT_ALIGN_JUSTIFY,
+}
 
 
 def draw_arrowhead(draw, p0: tuple, p1: tuple, color: tuple, stroke_width: float):
@@ -249,6 +259,11 @@ def _apply_one_edit(doc: "pymupdf.Document", page: "pymupdf.Page", e: dict) -> N
         display_name = e.get("tk_font", config.DEFAULT_FONT_NAME)
         bold, italic = e.get("bold", False), e.get("italic", False)
         font_path = _find_font_file(display_name, bold, italic) if rotation else None
+        # PDF FreeText /Q quadding only supports left/center/right — no
+        # justify — so clamp here rather than pass an unsupported value.
+        align = e.get("align", "left")
+        if align not in ("left", "center", "right"):
+            align = "left"
 
         if not rotation or not font_path:
             # Unrotated (or rotated but no real font file to rasterize
@@ -258,7 +273,7 @@ def _apply_one_edit(doc: "pymupdf.Document", page: "pymupdf.Page", e: dict) -> N
                 pymupdf.Rect(e["rect"]), e["text"],
                 fontsize=e.get("fontsize", config.EDIT_DEFAULT_FONT_SIZE),
                 fontname=_base14_fallback_code(display_name, bold, italic),
-                text_color=e["color"],
+                text_color=e["color"], align=_ALIGN_TO_QUAD[align],
             )
         else:
             from PIL import Image, ImageDraw, ImageFont
@@ -270,11 +285,13 @@ def _apply_one_edit(doc: "pymupdf.Document", page: "pymupdf.Page", e: dict) -> N
             color = tuple(round(c * 255) for c in e["color"]) + (255,)
 
             probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-            bbox = probe.textbbox((0, 0), e["text"], font=pil_font)
+            bbox = probe.textbbox((0, 0), e["text"], font=pil_font, align=align)
             text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
             pad = 4
             img = Image.new("RGBA", (text_w + pad * 2, text_h + pad * 2), (0, 0, 0, 0))
-            ImageDraw.Draw(img).text((pad - bbox[0], pad - bbox[1]), e["text"], font=pil_font, fill=color)
+            ImageDraw.Draw(img).text(
+                (pad - bbox[0], pad - bbox[1]), e["text"], font=pil_font, fill=color, align=align,
+            )
 
             rotated = img.rotate(-rotation, expand=True)
             buf = io.BytesIO()
@@ -395,7 +412,35 @@ def _apply_one_edit(doc: "pymupdf.Document", page: "pymupdf.Page", e: dict) -> N
         page.add_stamp_annot(pymupdf.Rect(e["rect"]), stamp=stamp_id)
 
     elif t == "signature":
-        page.insert_image(pymupdf.Rect(e["rect"]), stream=e["png_bytes"])
+        rotation = e.get("rotation", 0)
+        if not rotation:
+            page.insert_image(pymupdf.Rect(e["rect"]), stream=e["png_bytes"])
+        else:
+            # Same arbitrary-angle approach as the "image" branch below —
+            # PyMuPDF's own insert_image rotation is 90-degree-steps only,
+            # so rasterize the rotated signature with Pillow ourselves and
+            # insert that, matching what the live preview showed.
+            from PIL import Image
+
+            rect = pymupdf.Rect(e["rect"])
+            scale = 4  # render at ~4x the box's point size for print quality
+            box_w_px = max(1, round(rect.width * scale))
+            box_h_px = max(1, round(rect.height * scale))
+
+            img = Image.open(io.BytesIO(e["png_bytes"])).convert("RGBA")
+            img.thumbnail((box_w_px, box_h_px))
+            rotated = img.rotate(-rotation, expand=True)
+
+            buf = io.BytesIO()
+            rotated.save(buf, format="PNG")
+
+            new_w_pdf, new_h_pdf = rotated.width / scale, rotated.height / scale
+            cx, cy = (rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2
+            new_rect = pymupdf.Rect(
+                cx - new_w_pdf / 2, cy - new_h_pdf / 2,
+                cx + new_w_pdf / 2, cy + new_h_pdf / 2,
+            )
+            page.insert_image(new_rect, stream=buf.getvalue())
 
     elif t == "file_attachment":
         with open(e["filepath"], "rb") as f:
@@ -406,10 +451,12 @@ def _apply_one_edit(doc: "pymupdf.Document", page: "pymupdf.Page", e: dict) -> N
         font_kwargs = resolve_embeddable_font(
             e.get("tk_font", config.DEFAULT_FONT_NAME), e.get("bold", False), e.get("italic", False),
         )
+        align = e.get("align", "left")
         page.insert_textbox(
             pymupdf.Rect(e["rect"]), e["text"],
             fontsize=e.get("fontsize", config.EDIT_DEFAULT_FONT_SIZE),
             color=e.get("color", (0, 0, 0)),
+            align=_ALIGN_TO_QUAD.get(align, pymupdf.TEXT_ALIGN_LEFT),
             **font_kwargs,
         )
 
