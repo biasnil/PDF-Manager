@@ -8,9 +8,11 @@ All styling comes from Config/config.py — nothing here hardcodes a color.
 
 import os
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from Config import config
+
+from Script import print_utils
 
 
 class AccentButton(tk.Button):
@@ -314,8 +316,90 @@ class PagePreview(tk.Canvas):
         )
 
 
+class PrinterPickerDialog(tk.Toplevel):
+    """Small popup listing the system's installed printers so the person
+    can pick one and print `filepath` to it — opened by ProgressRow's
+    Print button, present on every tool tab (see print_utils.py)."""
+
+    def __init__(self, master, filepath: str):
+        super().__init__(master)
+        self.title("Print")
+        self.configure(bg=config.PANEL_BG)
+        self.resizable(False, False)
+        self.filepath = filepath
+
+        tk.Label(
+            self, text=f"Print:\n{os.path.basename(filepath)}",
+            bg=config.PANEL_BG, fg=config.TEXT_MAIN, font=config.FONT_SMALL,
+            justify=tk.LEFT, anchor="w", wraplength=280,
+        ).pack(fill=tk.X, padx=14, pady=(14, 8))
+
+        printers = print_utils.list_printers()
+        default = print_utils.get_default_printer()
+        initial = default if default in printers else (printers[0] if printers else "")
+        self.printer_var = tk.StringVar(value=initial)
+
+        if not print_utils.is_supported():
+            message = "Printing isn't available on this platform yet."
+        elif not printers:
+            message = "No printers found — add one in Windows Settings first."
+        else:
+            message = None
+
+        if message:
+            tk.Label(
+                self, text=message, bg=config.PANEL_BG, fg=config.TEXT_MUTED,
+                font=config.FONT_SMALL, wraplength=280, justify=tk.LEFT,
+            ).pack(fill=tk.X, padx=14, pady=(0, 10))
+        else:
+            ttk.Combobox(
+                self, textvariable=self.printer_var, state="readonly",
+                values=printers, width=32,
+            ).pack(fill=tk.X, padx=14, pady=(0, 10))
+
+        btn_row = tk.Frame(self, bg=config.PANEL_BG)
+        btn_row.pack(fill=tk.X, padx=14, pady=(0, 14))
+        tk.Button(
+            btn_row, text="Cancel", command=self.destroy,
+            bg=config.BUTTON_BG, fg=config.TEXT_MAIN, relief=tk.FLAT, bd=0,
+            padx=10, pady=5, cursor="hand2",
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            btn_row, text="Print", command=self._do_print,
+            bg=config.ACCENT, fg="white", relief=tk.FLAT, bd=0,
+            padx=10, pady=5, cursor="hand2",
+            state=tk.NORMAL if printers else tk.DISABLED,
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+
+        # Same front-and-center treatment as the Edit PDF signature pad —
+        # a Print dialog opening behind the main window is easy to miss.
+        self.transient(master.winfo_toplevel())
+        self.update_idletasks()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus_force()
+        self.grab_set()
+
+    def _do_print(self):
+        printer = self.printer_var.get()
+        if not printer:
+            return
+        try:
+            print_utils.print_file(self.filepath, printer)
+        except Exception as exc:
+            messagebox.showerror("Print", f"Couldn't print:\n{exc}")
+            return
+        self.destroy()
+
+
 class ProgressRow(tk.Frame):
-    """Progress bar + status label + Run button, shared across tool tabs."""
+    """Progress bar + status label + Run button + Print button, shared
+    across tool tabs. Print stays clickable at all times — rather than
+    just going disabled with no explanation, it shows a clear warning if
+    there's nothing to print yet or a run is still in progress. Call
+    set_output_path() with the run's resulting file once it succeeds;
+    pass None (or just don't call it) when a run produces zero or
+    multiple files, since Print only ever targets a single file."""
 
     def __init__(self, master, run_label, on_run):
         super().__init__(master, bg=config.PANEL_BG)
@@ -333,6 +417,15 @@ class ProgressRow(tk.Frame):
         self.run_btn = AccentButton(bottom, run_label, command=on_run)
         self.run_btn.pack(side=tk.RIGHT)
 
+        self._output_path = None
+        self._running = False
+        self.print_btn = tk.Button(
+            bottom, text="Print...", command=self._open_print_dialog,
+            bg=config.BUTTON_BG, fg=config.TEXT_MUTED, relief=tk.FLAT, bd=0,
+            padx=12, pady=8, font=config.FONT_BODY, cursor="hand2",
+        )
+        self.print_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
     def set_progress(self, current, total, message):
         self.bar["maximum"] = max(total, 1)
         self.bar["value"] = current
@@ -345,6 +438,26 @@ class ProgressRow(tk.Frame):
 
     def set_running(self, running: bool):
         self.run_btn.config(state=tk.DISABLED if running else tk.NORMAL)
+        self._running = running
+        if running:
+            # A new run is about to (over)write things — whatever Print
+            # was pointed at is stale until this run's done() calls
+            # set_output_path() again.
+            self._output_path = None
+            self.print_btn.config(fg=config.TEXT_MUTED)
 
     def set_run_label(self, text: str):
         self.run_btn.config(text=text)
+
+    def set_output_path(self, path):
+        self._output_path = path
+        self.print_btn.config(fg=config.TEXT_MAIN if path else config.TEXT_MUTED)
+
+    def _open_print_dialog(self):
+        if self._running:
+            messagebox.showwarning("Print", "Still working — wait for this to finish, then try Print again.")
+            return
+        if not self._output_path:
+            messagebox.showwarning("Print", "Save your changes first — there's nothing to print yet.")
+            return
+        PrinterPickerDialog(self, self._output_path)

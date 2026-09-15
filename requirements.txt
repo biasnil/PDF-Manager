@@ -4,3 +4,4 @@ python-pptx>=1.0
 pdf2docx>=0.5.8
 Pillow>=10.0
 tkinterdnd2>=0.3.0
+pywin32>=306; sys_platform == "win32"

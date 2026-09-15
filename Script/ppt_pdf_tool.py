@@ -157,6 +157,7 @@ class PptPdfTool(BaseTool):
         def done(result):
             self.progress.set_running(False)
             self.progress.reset()
+            self.progress.set_output_path(result)
             kind = "PowerPoint presentation" if mode == PDF_TO_PPT else "PDF"
             messagebox.showinfo("PDF <-> PowerPoint", f"Saved {kind} to:\n{result}")
 

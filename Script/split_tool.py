@@ -202,8 +202,13 @@ class SplitTool(BaseTool):
             self.progress.set_running(False)
             self.progress.reset()
             if mode == "single":
+                # One resulting file — Print can target it directly.
+                self.progress.set_output_path(result[0])
                 messagebox.showinfo("Split PDF", f"Saved {len(pages)} page(s) to:\n{result[0]}")
             else:
+                # Split into several files — nothing single for Print to
+                # target, so leave it disabled.
+                self.progress.set_output_path(None)
                 messagebox.showinfo("Split PDF", f"Created {len(result)} file(s) in:\n{target}")
 
         def error(e):

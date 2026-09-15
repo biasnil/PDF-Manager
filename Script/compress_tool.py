@@ -60,6 +60,7 @@ class CompressTool(BaseTool):
         def done(result):
             self.progress.set_running(False)
             self.progress.reset()
+            self.progress.set_output_path(result.output_path)
             messagebox.showinfo(
                 "Compress PDF",
                 f"Saved to:\n{result.output_path}\n\n"

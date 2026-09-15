@@ -40,6 +40,7 @@ class MergeTool(BaseTool):
         def done(result):
             self.progress.set_running(False)
             self.progress.reset()
+            self.progress.set_output_path(result)
             messagebox.showinfo("Merge PDF", f"Saved merged PDF to:\n{result}")
 
         def error(e):
