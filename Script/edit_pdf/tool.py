@@ -2046,6 +2046,7 @@ class PdfEditTool(BaseTool):
         def done(result):
             self.progress.set_running(False)
             self.progress.reset()
+            self.progress.set_output_path(result)
             messagebox.showinfo("Edit PDF", f"Saved to:\n{result}")
 
         def error(e):

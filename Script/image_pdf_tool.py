@@ -264,8 +264,13 @@ class ImagePdfTool(BaseTool):
             self.progress_images.set_running(False)
             self.progress_images.reset()
             if merge:
+                # One resulting PDF — Print can target it directly.
+                self.progress_images.set_output_path(result[0])
                 messagebox.showinfo("Image <-> PDF", f"Saved PDF to:\n{result[0]}")
             else:
+                # Several separate PDFs — nothing single for Print to
+                # target, so leave it disabled.
+                self.progress_images.set_output_path(None)
                 messagebox.showinfo(
                     "Image <-> PDF", f"Created {len(result)} PDF(s) in:\n{target}"
                 )

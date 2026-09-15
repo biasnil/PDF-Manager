@@ -130,6 +130,7 @@ class WordPdfTool(BaseTool):
         def done(result):
             self.progress.set_running(False)
             self.progress.reset()
+            self.progress.set_output_path(result)
             kind = "PDF" if mode == WORD_TO_PDF else "Word document"
             messagebox.showinfo("Word <-> PDF", f"Saved {kind} to:\n{result}")
 

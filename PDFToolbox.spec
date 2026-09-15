@@ -46,6 +46,10 @@ a = Analysis(
         # worked fine.
         'win32com.client',
         'win32com.gen_py',
+        # Script/print_utils.py — printer enumeration + the "printto"
+        # shell verb behind every tab's Print button.
+        'win32print',
+        'win32api',
     ],
     hookspath=[],
     hooksconfig={},
